@@ -1,4 +1,31 @@
 /*
+    This file is part of dtachez.
+
+    Copyright (C) 2023 SudoMaker, Ltd.
+    Author: Reimu NotMoe <reimu@sudomaker.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/*
+    This program is based on dtach, which was originally released under
+    the GPLv2 license by Ned T. Crigler.
+
+    Below is the previous license header.
+*/
+
+/*
     dtach - A simple program that emulates the detach feature of screen.
     Copyright (C) 2004-2016 Ned T. Crigler
 
@@ -15,11 +42,11 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "dtach.h"
+
+#include "dtachez.hpp"
 
 /* The pty struct - The pty information is stored here. */
-struct pty
-{
+struct pty {
 	/* File descriptor of the pty */
 	int fd;
 #ifdef BROKEN_MASTER
@@ -36,20 +63,16 @@ struct pty
 };
 
 /* A connected client */
-struct client
-{
-	/* The next client in the linked list. */
-	struct client *next;
-	/* The previous client in the linked list. */
-	struct client **pprev;
-	/* File descriptor of the client. */
-	int fd;
+struct client {
+	unsigned index;
+	/* File descriptors of the client. */
+	conn_pipes fds;
 	/* Whether or not the client is attached. */
 	int attached;
 };
 
 /* The list of connected clients. */
-static struct client *clients;
+static std::list<client> clients;
 /* The pseudo-terminal created for the child process. */
 static struct pty the_pty;
 
@@ -58,17 +81,27 @@ pid_t forkpty(int *amaster, char *name, struct termios *termp,
 	struct winsize *winp);
 #endif
 
+static void unlink_socket(const std::string &s) {
+	auto s1 = s + "_miso";
+	auto s2 = s + "_mosi";
+	unlink(s1.c_str());
+	unlink(s2.c_str());
+}
+
+static void unlink_socket(unsigned idx) {
+	unlink_socket(std::string(sockname) + "_" + std::to_string(idx));
+}
+
 /* Unlink the socket */
-static void
-unlink_socket(void)
-{
-	unlink(sockname);
+static void unlink_socket(void) {
+	unlink_socket(sockname);
+	for (auto &it : clients) {
+		unlink_socket(it.index);
+	}
 }
 
 /* Signal */
-static RETSIGTYPE 
-die(int sig)
-{
+static RETSIGTYPE die(int sig) {
 	/* Well, the child died. */
 	if (sig == SIGCHLD)
 	{
@@ -81,32 +114,8 @@ die(int sig)
 	exit(1);
 }
 
-/* Sets a file descriptor to non-blocking mode. */
-static int
-setnonblocking(int fd)
-{
-	int flags;
-
-#if defined(O_NONBLOCK)
-	flags = fcntl(fd, F_GETFL);
-	if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-		return -1;
-	return 0;
-#elif defined(FIONBIO)
-	flags = 1;
-	if (ioctl(fd, FIONBIO, &flags) < 0)
-		return -1;
-	return 0;
-#else
-#warning Do not know how to set non-blocking mode.
-	return 0;
-#endif
-}
-
 /* Initialize the pty structure. */
-static int
-init_pty(char **argv, int statusfd)
-{
+static int init_pty(char **argv, int statusfd) {
 	/* Use the original terminal's settings. We don't have to set the
 	** window size here, because the attacher will send it in a packet. */
 	the_pty.term = orig_term;
@@ -169,7 +178,7 @@ killpty(struct pty *pty, int sig)
 		return;
 #endif
 	if (ioctl(pty->fd, TIOCGPGRP, &pgrp) >= 0 && pgrp != -1 &&
-		kill(-pgrp, sig) >= 0)
+	    kill(-pgrp, sig) >= 0)
 		return;
 #endif
 
@@ -178,45 +187,25 @@ killpty(struct pty *pty, int sig)
 }
 
 /* Creates a new unix domain socket. */
-static int
-create_socket(char *name)
-{
-	int s;
-	struct sockaddr_un sockun;
+static conn_pipes create_conn_pipes(const std::string &name, bool nonblocking) {
+	auto mkfifo_and_open = [](const std::string &nom, bool nonblocking) {
+		ensure_mkfifo(nom.c_str());
 
-	if (strlen(name) > sizeof(sockun.sun_path) - 1)
-	{
-		errno = ENAMETOOLONG;
-		return -1;
-	}
+		int s = ensure_open(nom.c_str(), O_RDWR);
 
-	s = socket(PF_UNIX, SOCK_STREAM, 0);
-	if (s < 0)
-		return -1;
-	sockun.sun_family = AF_UNIX;
-	strcpy(sockun.sun_path, name);
-	if (bind(s, (struct sockaddr*)&sockun, sizeof(sockun)) < 0)
-	{
-		close(s);
-		return -1;
-	}
-	if (listen(s, 128) < 0)
-	{
-		close(s);
-		return -1;
-	}
-	if (setnonblocking(s) < 0)
-	{
-		close(s);
-		return -1;
-	}
-	/* chmod it to prevent any suprises */
-	if (chmod(name, 0600) < 0)
-	{
-		close(s);
-		return -1;
-	}
-	return s;
+		if (nonblocking) {
+			if (setnonblocking(s)) {
+				THROW_ERROR("failed to set nonblocking for pipe");
+			}
+		}
+
+		return s;
+	};
+
+	return {
+		.fd_miso = mkfifo_and_open(name + "_miso", nonblocking),
+		.fd_mosi = mkfifo_and_open(name + "_mosi", nonblocking),
+	};
 }
 
 /* Update the modes on the socket. */
@@ -240,12 +229,9 @@ update_socket_modes(int exec)
 
 /* Process activity on the pty - Input and terminal changes are sent out to
 ** the attached clients. If the pty goes away, we die. */
-static void
-pty_activity(int s)
-{
+static void pty_activity(const conn_pipes &s) {
 	unsigned char buf[BUFSIZE];
 	ssize_t len;
-	struct client *p;
 	fd_set readfds, writefds;
 	int highest_fd, nclients;
 
@@ -273,37 +259,35 @@ top:
 	*/
 	FD_ZERO(&readfds);
 	FD_ZERO(&writefds);
-	FD_SET(s, &readfds);
-	highest_fd = s;
-	for (p = clients, nclients = 0; p; p = p->next)
-	{
-		if (!p->attached)
+	FD_SET(s.fd_miso, &readfds);
+	highest_fd = s.fd_miso;
+	for (auto &it : clients) {
+		if (!it.attached)
 			continue;
-		FD_SET(p->fd, &writefds);
-		if (p->fd > highest_fd)
-			highest_fd = p->fd;
+		FD_SET(it.fds.fd_mosi, &writefds);
+		if (it.fds.fd_mosi > highest_fd)
+			highest_fd = it.fds.fd_mosi;
 		nclients++;
 	}
+
 	if (nclients == 0)
 		return;
+
 	if (select(highest_fd + 1, &readfds, &writefds, NULL, NULL) < 0)
 		return;
 
 	/* Send the data out to the clients. */
-	for (p = clients, nclients = 0; p; p = p->next)
-	{
+	for (auto &it : clients) {
 		ssize_t written;
 
-		if (!FD_ISSET(p->fd, &writefds))
+		if (!FD_ISSET(it.fds.fd_mosi, &writefds))
 			continue;
 
 		written = 0;
-		while (written < len)
-		{
-			ssize_t n = write(p->fd, buf + written, len - written);
+		while (written < len) {
+			ssize_t n = write(it.fds.fd_mosi, buf + written, len - written);
 
-			if (n > 0)
-			{
+			if (n > 0) {
 				written += n;
 				continue;
 			}
@@ -313,87 +297,103 @@ top:
 				nclients = -1;
 			break;
 		}
+
 		if (nclients != -1 && written == len)
 			nclients++;
 	}
 
 	/* Try again if nothing happened. */
-	if (!FD_ISSET(s, &readfds) && nclients == 0)
+	if (!FD_ISSET(s.fd_miso, &readfds) && nclients == 0)
 		goto top;
 }
 
 /* Process activity on the control socket */
-static void
-control_activity(int s)
-{
-	int fd;
-	struct client *p;
- 
-	/* Accept the new client and link it in. */
-	fd = accept(s, NULL, NULL);
-	if (fd < 0)
-		return;
-	else if (setnonblocking(fd) < 0)
-	{
-		close(fd);
-		return;
+static void control_activity(const conn_pipes &fd_main_pipe) {
+	uint8_t ctrl_byte;
+
+	if (read(fd_main_pipe.fd_miso, &ctrl_byte, 1) != 1) {
+		THROW_ERROR("failed to read main pipe");
 	}
 
-	/* Link it in. */
-	p = malloc(sizeof(struct client));
-	p->fd = fd;
-	p->attached = 0;
-	p->pprev = &clients;
-	p->next = *(p->pprev);
-	if (p->next)
-		p->next->pprev = &p->next;
-	*(p->pprev) = p;
+	bool is_create = (ctrl_byte & (1 << 7)) != 0;
+	uint8_t req_index = ctrl_byte & 0x7f;
+
+	if (is_create) {
+		uint8_t new_index = 0;
+
+		for (auto &it : clients) {
+			if (new_index == it.index) {
+				new_index++;
+			} else {
+				break;
+			}
+		}
+
+		if (new_index < 127) {
+			clients.emplace_back(client{
+				.index = new_index,
+				.fds = create_conn_pipes(std::string(sockname) + "_" + std::to_string(new_index), true),
+				.attached = 0,
+			});
+		}
+
+		if (write(fd_main_pipe.fd_mosi, &new_index, 1) != 1) {
+			THROW_ERROR("failed to write main pipe");
+		}
+
+//		printf("opened client %u\n", new_index);
+	} else {
+		for (auto it = clients.begin(); it != clients.end(); it++) {
+			if (it->index == req_index) {
+				close(it->fds.fd_miso);
+				close(it->fds.fd_mosi);
+				clients.erase(it);
+				unlink_socket((unsigned)req_index);
+				break;
+			}
+		}
+
+//		printf("closed client %u\n", req_index);
+	}
 }
 
 /* Process activity from a client. */
-static void
-client_activity(struct client *p)
-{
+static int client_activity(struct client *p) {
 	ssize_t len;
 	struct packet pkt;
 
 	/* Read the activity. */
-	len = read(p->fd, &pkt, sizeof(struct packet));
+	len = read(p->fds.fd_miso, &pkt, sizeof(struct packet));
 	if (len < 0 && (errno == EAGAIN || errno == EINTR))
-		return;
+		return 0;
 
 	/* Close the client on an error. */
-	if (len <= 0)
-	{
-		close(p->fd);
-		if (p->next)
-			p->next->pprev = p->pprev;
-		*(p->pprev) = p->next;
-		free(p);
-		return;
-	} 
+	if (len <= 0) {
+		close(p->fds.fd_miso);
+		close(p->fds.fd_mosi);
+		return -1;
+	}
 
 	/* Push out data to the program. */
-	if (pkt.type == MSG_PUSH)
-	{
+	if (pkt.type == MSG_PUSH) {
 		if (pkt.len <= sizeof(pkt.u.buf))
 			write(the_pty.fd, pkt.u.buf, pkt.len);
 	}
 
-	/* Attach or detach from the program. */
+		/* Attach or detach from the program. */
 	else if (pkt.type == MSG_ATTACH)
 		p->attached = 1;
 	else if (pkt.type == MSG_DETACH)
 		p->attached = 0;
 
-	/* Window size change request, without a forced redraw. */
+		/* Window size change request, without a forced redraw. */
 	else if (pkt.type == MSG_WINCH)
 	{
 		the_pty.ws = pkt.u.ws;
 		ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
 	}
 
-	/* Force a redraw using a particular method. */
+		/* Force a redraw using a particular method. */
 	else if (pkt.type == MSG_REDRAW)
 	{
 		int method = pkt.len;
@@ -403,7 +403,7 @@ client_activity(struct client *p)
 		if (method == REDRAW_UNSPEC)
 			method = redraw_method;
 		if (method == REDRAW_NONE)
-			return;
+			return 0;
 
 		/* Set the window size. */
 		the_pty.ws = pkt.u.ws;
@@ -415,26 +415,25 @@ client_activity(struct client *p)
 		{
 			char c = '\f';
 
-                	if (((the_pty.term.c_lflag & (ECHO|ICANON)) == 0) &&
-                        	(the_pty.term.c_cc[VMIN] == 1))
+			if (((the_pty.term.c_lflag & (ECHO|ICANON)) == 0) &&
+			    (the_pty.term.c_cc[VMIN] == 1))
 			{
 				write(the_pty.fd, &c, 1);
 			}
 		}
-		/* Send a WINCH signal to the program. */
+			/* Send a WINCH signal to the program. */
 		else if (method == REDRAW_WINCH)
 		{
 			killpty(&the_pty, SIGWINCH);
 		}
 	}
+
+	return 0;
 }
 
 /* The master process - It watches over the pty process and the attached */
 /* clients. */
-static void
-master_process(int s, char **argv, int waitattach, int statusfd)
-{
-	struct client *p, *next;
+static void master_process(const conn_pipes &fd_main_pipe, char **argv, int waitattach, int statusfd) {
 	fd_set readfds;
 	int highest_fd;
 	int nullfd;
@@ -484,77 +483,72 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		close(nullfd);
 
 	/* Loop forever. */
-	while (1)
-	{
+	while (1) {
 		int new_has_attached_client = 0;
 
 		/* Re-initialize the file descriptor set for select. */
 		FD_ZERO(&readfds);
-		FD_SET(s, &readfds);
-		highest_fd = s;
+		FD_SET(fd_main_pipe.fd_miso, &readfds);
+		highest_fd = fd_main_pipe.fd_miso;
 
 		/*
 		** When waitattach is set, wait until the client attaches
 		** before trying to read from the pty.
 		*/
-		if (waitattach)
-		{
-			if (clients && clients->attached)
+		if (waitattach) {
+			if (!clients.empty() && clients.front().attached)
 				waitattach = 0;
-		}
-		else
-		{
+		} else {
 			FD_SET(the_pty.fd, &readfds);
 			if (the_pty.fd > highest_fd)
 				highest_fd = the_pty.fd;
 		}
 
-		for (p = clients; p; p = p->next)
-		{
-			FD_SET(p->fd, &readfds);
-			if (p->fd > highest_fd)
-				highest_fd = p->fd;
+		for (auto &it : clients) {
+			FD_SET(it.fds.fd_miso, &readfds);
+			if (it.fds.fd_miso > highest_fd)
+				highest_fd = it.fds.fd_miso;
 
-			if (p->attached)
+			if (it.attached)
 				new_has_attached_client = 1;
 		}
 
 		/* chmod the socket if necessary. */
-		if (has_attached_client != new_has_attached_client)
-		{
+		if (has_attached_client != new_has_attached_client) {
 			update_socket_modes(new_has_attached_client);
 			has_attached_client = new_has_attached_client;
 		}
 
 		/* Wait for something to happen. */
-		if (select(highest_fd + 1, &readfds, NULL, NULL, NULL) < 0)
-		{
+		if (select(highest_fd + 1, &readfds, nullptr, nullptr, nullptr) < 0) {
 			if (errno == EINTR || errno == EAGAIN)
 				continue;
+			THROW_ERROR("select");
 			exit(1);
 		}
 
 		/* New client? */
-		if (FD_ISSET(s, &readfds))
-			control_activity(s);
+		if (FD_ISSET(fd_main_pipe.fd_miso, &readfds))
+			control_activity(fd_main_pipe);
 		/* Activity on a client? */
-		for (p = clients; p; p = next)
-		{
-			next = p->next;
-			if (FD_ISSET(p->fd, &readfds))
-				client_activity(p);
+		for (auto it = clients.begin(); it != clients.end(); ) {
+			if (FD_ISSET(it->fds.fd_miso, &readfds)) {
+				if (client_activity(&(*it))) {
+					it = clients.erase(it);
+					continue;
+				}
+			}
+			it++;
 		}
 		/* pty activity? */
 		if (FD_ISSET(the_pty.fd, &readfds))
-			pty_activity(s);
+			pty_activity(fd_main_pipe);
 	}
 }
 
-int
-master_main(char **argv, int waitattach, int dontfork)
-{
+int master_main(char **argv, int waitattach, int dontfork) {
 	int fd[2] = {-1, -1};
-	int s;
+	conn_pipes fd_main_pipe;
 	pid_t pid;
 
 	/* Use a default redraw method if one hasn't been specified yet. */
@@ -562,51 +556,22 @@ master_main(char **argv, int waitattach, int dontfork)
 		redraw_method = REDRAW_CTRL_L;
 
 	/* Create the unix domain socket. */
-	s = create_socket(sockname);
-	if (s < 0 && errno == ENAMETOOLONG)
-	{
-		char *slash = strrchr(sockname, '/');
-
-		/* Try to shorten the socket's path name by using chdir. */
-		if (slash)
-		{
-			int dirfd = open(".", O_RDONLY);
-
-			if (dirfd >= 0)
-			{
-				*slash = '\0';
-				if (chdir(sockname) >= 0)
-				{
-					s = create_socket(slash + 1);
-					fchdir(dirfd);
-				}
-				*slash = '/';
-				close(dirfd);
-			}
-		}
-	}
-	if (s < 0)
-	{
-		printf("%s: %s: %s\n", progname, sockname, strerror(errno));
-		return 1;
-	}
+	fd_main_pipe = create_conn_pipes(sockname, false);
 
 #if defined(F_SETFD) && defined(FD_CLOEXEC)
-	fcntl(s, F_SETFD, FD_CLOEXEC);
+	fcntl(fd_main_pipe.fd_miso, F_SETFD, FD_CLOEXEC);
+	fcntl(fd_main_pipe.fd_mosi, F_SETFD, FD_CLOEXEC);
 
 	/* If FD_CLOEXEC works, create a pipe and use it to report any errors
 	** that occur while trying to execute the program. */
-	if (dontfork)
-	{
+	if (dontfork) {
 		fd[1] = dup(2);
 		if (fcntl(fd[1], F_SETFD, FD_CLOEXEC) < 0)
 		{
 			close(fd[1]);
 			fd[1] = -1;
 		}
-	}
-	else if (pipe(fd) >= 0)
-	{
+	} else if (pipe(fd) >= 0) {
 		if (fcntl(fd[0], F_SETFD, FD_CLOEXEC) < 0 ||
 		    fcntl(fd[1], F_SETFD, FD_CLOEXEC) < 0)
 		{
@@ -617,34 +582,29 @@ master_main(char **argv, int waitattach, int dontfork)
 	}
 #endif
 
-	if (dontfork)
-	{
-		master_process(s, argv, waitattach, fd[1]);
+	if (dontfork) {
+		master_process(fd_main_pipe, argv, waitattach, fd[1]);
 		return 0;
 	}
 
 	/* Fork off so we can daemonize and such */
 	pid = fork();
-	if (pid < 0)
-	{
+	if (pid < 0) {
 		printf("%s: fork: %s\n", progname, strerror(errno));
 		unlink_socket();
 		return 1;
-	}
-	else if (pid == 0)
-	{
+	} else if (pid == 0) {
 		/* Child - this becomes the master */
 		if (fd[0] != -1)
 			close(fd[0]);
-		master_process(s, argv, waitattach, fd[1]);
+		master_process(fd_main_pipe, argv, waitattach, fd[1]);
 		return 0;
 	}
 	/* Parent - just return. */
 
 #if defined(F_SETFD) && defined(FD_CLOEXEC)
 	/* Check if an error occurred while trying to execute the program. */
-	if (fd[0] != -1)
-	{
+	if (fd[0] != -1) {
 		char buf[1024];
 		ssize_t len;
 
@@ -659,7 +619,8 @@ master_main(char **argv, int waitattach, int dontfork)
 		close(fd[0]);
 	}
 #endif
-	close(s);
+	close(fd_main_pipe.fd_miso);
+	close(fd_main_pipe.fd_mosi);
 	return 0;
 }
 

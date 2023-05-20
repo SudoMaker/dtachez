@@ -1,4 +1,31 @@
 /*
+    This file is part of dtachez.
+
+    Copyright (C) 2023 SudoMaker, Ltd.
+    Author: Reimu NotMoe <reimu@sudomaker.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/*
+    This program is based on dtach, which was originally released under
+    the GPLv2 license by Ned T. Crigler.
+
+    Below is the previous license header.
+*/
+
+/*
     dtach - A simple program that emulates the detach feature of screen.
     Copyright (C) 2004-2016 Ned T. Crigler
 
@@ -15,7 +42,8 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "dtach.h"
+
+#include "dtachez.hpp"
 
 /*
 ** dtach is a quick hack, since I wanted the detach feature of screen without
@@ -24,7 +52,7 @@
 */
 
 /* Make sure the binary has a copyright. */
-const char copyright[] = "dtach - version " PACKAGE_VERSION "(C)Copyright 2004-2016 Ned T. Crigler";
+const char copyright[] = "dtachez - version " PACKAGE_VERSION "(C) Copyright 2023 SudoMaker, Ltd.";
 
 /* argv[0] from the program */
 char *progname;
@@ -49,13 +77,13 @@ static void
 usage()
 {
 	printf(
-		"dtach - version %s, compiled on %s at %s.\n"
-		"Usage: dtach -a <socket> <options>\n"
-		"       dtach -A <socket> <options> <command...>\n"
-		"       dtach -c <socket> <options> <command...>\n"
-		"       dtach -n <socket> <options> <command...>\n"
-		"       dtach -N <socket> <options> <command...>\n"
-		"       dtach -p <socket>\n"
+		"dtachez - version %s, compiled on %s at %s.\n"
+		"Usage: dtachez -a <socket> <options>\n"
+		"       dtachez -A <socket> <options> <command...>\n"
+		"       dtachez -c <socket> <options> <command...>\n"
+		"       dtachez -n <socket> <options> <command...>\n"
+		"       dtachez -N <socket> <options> <command...>\n"
+		"       dtachez -p <socket>\n"
 		"Modes:\n"
 		"  -a\t\tAttach to the specified socket.\n"
 		"  -A\t\tAttach to the specified socket, or create it if it\n"
@@ -65,7 +93,7 @@ usage()
 		"detached.\n"
 		"  -N\t\tCreate a new socket and run the specified command "
 		"detached,\n"
-		"\t\t  and have dtach run in the foreground.\n"
+		"\t\t  and have dtachez run in the foreground.\n"
 		"  -p\t\tCopy the contents of standard input to the specified\n"
 		"\t\t  socket.\n"
 		"Options:\n"
@@ -99,7 +127,7 @@ main(int argc, char **argv)
 			usage();
 		else if (strncmp(*argv, "--version", strlen(*argv)) == 0)
 		{
-			printf("dtach - version %s, compiled on %s at %s.\n",
+			printf("dtachez - version %s, compiled on %s at %s.\n",
 				PACKAGE_VERSION, __DATE__, __TIME__);
 			return 0;
 		}
@@ -267,15 +295,13 @@ main(int argc, char **argv)
 	{
 		/* Try to attach first. If that doesn't work, create a new
 		** socket. */
-		if (attach_main(1) != 0)
-		{
-			if (errno == ECONNREFUSED || errno == ENOENT)
-			{
-				if (errno == ECONNREFUSED)
-					unlink(sockname);
-				if (master_main(argv, 1, 0) != 0)
-					return 1;
-			}
+
+		try {
+			attach_main(1);
+		} catch (...) {
+			if (master_main(argv, 1, 0) != 0)
+				return 1;
+
 			return attach_main(0);
 		}
 	}

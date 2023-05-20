@@ -1,4 +1,31 @@
 /*
+    This file is part of dtachez.
+
+    Copyright (C) 2023 SudoMaker, Ltd.
+    Author: Reimu NotMoe <reimu@sudomaker.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/*
+    This program is based on dtach, which was originally released under
+    the GPLv2 license by Ned T. Crigler.
+
+    Below is the previous license header.
+*/
+
+/*
     dtach - A simple program that emulates the detach feature of screen.
     Copyright (C) 2001, 2004-2016 Ned T. Crigler
 
@@ -15,32 +42,28 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-#ifndef dtach_h
-#define dtach_h
 
-#include <config.h>
+#pragma once
 
-#include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <list>
+#include <exception>
+#include <system_error>
 
-#if TIME_WITH_SYS_TIME
-#include <sys/time.h>
-#include <time.h>
-#else
-#if HAVE_SYS_TIME_H
-#include <sys/time.h>
-#else
-#include <time.h>
-#endif
-#endif
+#include <cerrno>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
-#ifdef HAVE_PTY_H
+#include <ctime>
+
+#include "config.h"
+
 #include <pty.h>
-#endif
+
+#include <fcntl.h>
+
+#define THROW_ERROR(s)		throw std::system_error(errno, std::system_category(), (s))
 
 #ifdef HAVE_UTIL_H
 #include <util.h>
@@ -54,17 +77,11 @@
 #include <stropts.h>
 #endif
 
-#ifdef HAVE_UNISTD_H
 #include <unistd.h>
-#endif
 
-#ifdef HAVE_SYS_IOCTL_H
 #include <sys/ioctl.h>
-#endif
 
-#ifdef HAVE_SYS_RESOURCE_H
 #include <sys/resource.h>
-#endif
 
 #include <termios.h>
 #include <sys/select.h>
@@ -85,8 +102,7 @@ extern int detach_char, no_suspend, redraw_method;
 extern struct termios orig_term;
 extern int dont_have_tty;
 
-enum
-{
+enum {
 	MSG_PUSH	= 0,
 	MSG_ATTACH	= 1,
 	MSG_DETACH	= 2,
@@ -94,8 +110,7 @@ enum
 	MSG_REDRAW	= 4,
 };
 
-enum
-{
+enum {
 	REDRAW_UNSPEC	= 0,
 	REDRAW_NONE	= 1,
 	REDRAW_CTRL_L	= 2,
@@ -103,15 +118,17 @@ enum
 };
 
 /* The client to master protocol. */
-struct packet
-{
+struct packet {
 	unsigned char type;
 	unsigned char len;
-	union
-	{
+	union {
 		unsigned char buf[sizeof(struct winsize)];
 		struct winsize ws;
 	} u;
+};
+
+struct conn_pipes {
+	int fd_miso, fd_mosi;
 };
 
 /*
@@ -130,7 +147,12 @@ int attach_main(int noerror);
 int master_main(char **argv, int waitattach, int dontfork);
 int push_main(void);
 
+extern int setnonblocking(int fd);
+extern void write_all(int fd, const void *buf, size_t count);
+extern void read_all(int fd, void *buf, size_t count);
+extern int ensure_open(const char *s, int m);
+extern void ensure_mkfifo(const char *s);
+
 #ifdef sun
 #define BROKEN_MASTER
-#endif
 #endif

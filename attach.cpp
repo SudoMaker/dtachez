@@ -1,4 +1,31 @@
 /*
+    This file is part of dtachez.
+
+    Copyright (C) 2023 SudoMaker, Ltd.
+    Author: Reimu NotMoe <reimu@sudomaker.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+*/
+
+/*
+    This program is based on dtach, which was originally released under
+    the GPLv2 license by Ned T. Crigler.
+
+    Below is the previous license header.
+*/
+
+/*
     dtach - A simple program that emulates the detach feature of screen.
     Copyright (C) 2004-2016 Ned T. Crigler
 
@@ -15,7 +42,7 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "dtach.h"
+#include "dtachez.hpp"
 
 #ifndef VDISABLE
 #ifdef _POSIX_VDISABLE
@@ -33,10 +60,10 @@ static struct termios cur_term;
 /* 1 if the window size changed */
 static int win_changed;
 
+static uint8_t this_index;
+
 /* Restores the original terminal settings. */
-static void
-restore_term(void)
-{
+static void restore_term(void) {
 	tcsetattr(0, TCSADRAIN, &orig_term);
 
 	/* Make cursor visible. Assumes VT100. */
@@ -45,67 +72,65 @@ restore_term(void)
 }
 
 /* Connects to a unix domain socket */
-static int
-connect_socket(char *name)
-{
-	int s;
-	struct sockaddr_un sockun;
+static conn_pipes connect_pipes(const std::string &name) {
+	auto do_open = [](const std::string &nom, int mode) {
+		return ensure_open(nom.c_str(), mode);
+	};
 
-	if (strlen(name) > sizeof(sockun.sun_path) - 1)
-	{
-		errno = ENAMETOOLONG;
-		return -1;
+	return conn_pipes{
+		.fd_miso = do_open(name + "_miso", O_WRONLY),
+		.fd_mosi = do_open(name + "_mosi", O_RDONLY),
+	};
+}
+
+static conn_pipes request_and_connect(const std::string &name) {
+	puts("note: if you see this message forever, check for stale pipe files");
+
+	auto pmain = connect_pipes(name);
+
+	uint8_t ctrl_byte = 1 << 7;
+
+	write_all(pmain.fd_miso, &ctrl_byte, 1);
+	read_all(pmain.fd_mosi, &this_index, 1);
+
+	close(pmain.fd_miso);
+	close(pmain.fd_mosi);
+
+	if (this_index >= 127) {
+		puts("error: server is full");
+		exit(2);
 	}
 
-	s = socket(PF_UNIX, SOCK_STREAM, 0);
-	if (s < 0)
-		return -1;
-	sockun.sun_family = AF_UNIX;
-	strcpy(sockun.sun_path, name);
-	if (connect(s, (struct sockaddr*)&sockun, sizeof(sockun)) < 0)
-	{
-		close(s);
+	return connect_pipes(name + "_" + std::to_string((int)this_index));
+}
 
-		/* ECONNREFUSED is also returned for regular files, so make
-		** sure we are trying to connect to a socket. */
-		if (errno == ECONNREFUSED)
-		{
-			struct stat st;
+static void disconnect(const std::string &name) {
+	auto pmain = connect_pipes(name);
 
-			if (stat(name, &st) < 0)
-				return -1;
-			else if (!S_ISSOCK(st.st_mode) || S_ISREG(st.st_mode))
-				errno = ENOTSOCK;
-		}
-		return -1;
-	}
-	return s;
+	uint8_t ctrl_byte = this_index;
+
+	write_all(pmain.fd_miso, &ctrl_byte, 1);
 }
 
 /* Signal */
-static RETSIGTYPE
-die(int sig)
-{
+static RETSIGTYPE die(int sig) {
 	/* Print a nice pretty message for some things. */
 	if (sig == SIGHUP || sig == SIGINT)
 		printf(EOS "\r\n[detached]\r\n");
 	else
 		printf(EOS "\r\n[got signal %d - dying]\r\n", sig);
+	disconnect(sockname);
 	exit(1);
 }
 
 /* Window size change. */
-static RETSIGTYPE
-win_change()
-{
+static RETSIGTYPE win_change(int sig) {
 	signal(SIGWINCH, win_change);
 	win_changed = 1;
 }
 
 /* Handles input from the keyboard. */
-static void
-process_kbd(int s, struct packet *pkt)
-{
+static void process_kbd(int s, struct packet *pkt) {
 	/* Suspend? */
 	if (!no_suspend && (pkt->u.buf[0] == cur_term.c_cc[VSUSP]))
 	{
@@ -134,6 +159,7 @@ process_kbd(int s, struct packet *pkt)
 	else if (pkt->u.buf[0] == detach_char)
 	{
 		printf(EOS "\r\n[detached]\r\n");
+		disconnect(sockname);
 		exit(0);
 	}
 	/* Just in case something pukes out. */
@@ -144,46 +170,16 @@ process_kbd(int s, struct packet *pkt)
 	write(s, pkt, sizeof(struct packet));
 }
 
-int
-attach_main(int noerror)
-{
+int attach_main(int noerror) {
 	struct packet pkt;
 	unsigned char buf[BUFSIZE];
 	fd_set readfds;
-	int s;
+	conn_pipes s;
 
 	/* Attempt to open the socket. Don't display an error if noerror is 
 	** set. */
-	s = connect_socket(sockname);
-	if (s < 0 && errno == ENAMETOOLONG)
-	{
-		char *slash = strrchr(sockname, '/');
 
-		/* Try to shorten the socket's path name by using chdir. */
-		if (slash)
-		{
-			int dirfd = open(".", O_RDONLY);
-
-			if (dirfd >= 0)
-			{
-				*slash = '\0';
-				if (chdir(sockname) >= 0)
-				{
-					s = connect_socket(slash + 1);
-					fchdir(dirfd);
-				}
-				*slash = '/';
-				close(dirfd);
-			}
-		}
-	}
-	if (s < 0)
-	{
-		if (!noerror)
-			printf("%s: %s: %s\n", progname, sockname,
-				strerror(errno));
-		return 1;
-	}
+	s = request_and_connect(sockname);
 
 	/* The current terminal settings are equal to the original terminal
 	** settings at this point. */
@@ -219,23 +215,22 @@ attach_main(int noerror)
 	/* Tell the master that we want to attach. */
 	memset(&pkt, 0, sizeof(struct packet));
 	pkt.type = MSG_ATTACH;
-	write(s, &pkt, sizeof(struct packet));
+	write(s.fd_miso, &pkt, sizeof(struct packet));
 
 	/* We would like a redraw, too. */
 	pkt.type = MSG_REDRAW;
 	pkt.len = redraw_method;
 	ioctl(0, TIOCGWINSZ, &pkt.u.ws);
-	write(s, &pkt, sizeof(struct packet));
+	write(s.fd_miso, &pkt, sizeof(struct packet));
 
 	/* Wait for things to happen */
-	while (1)
-	{
+	while (1) {
 		int n;
 
 		FD_ZERO(&readfds);
 		FD_SET(0, &readfds);
-		FD_SET(s, &readfds);
-		n = select(s + 1, &readfds, NULL, NULL, NULL);
+		FD_SET(s.fd_mosi, &readfds);
+		n = select(s.fd_mosi + 1, &readfds, NULL, NULL, NULL);
 		if (n < 0 && errno != EINTR && errno != EAGAIN)
 		{
 			printf(EOS "\r\n[select failed]\r\n");
@@ -243,9 +238,9 @@ attach_main(int noerror)
 		}
 
 		/* Pty activity */
-		if (n > 0 && FD_ISSET(s, &readfds))
+		if (n > 0 && FD_ISSET(s.fd_mosi, &readfds))
 		{
-			ssize_t len = read(s, buf, sizeof(buf));
+			ssize_t len = read(s.fd_mosi, buf, sizeof(buf));
 
 			if (len == 0)
 			{
@@ -275,7 +270,7 @@ attach_main(int noerror)
 				exit(1);
 
 			pkt.len = len;
-			process_kbd(s, &pkt);
+			process_kbd(s.fd_miso, &pkt);
 			n--;
 		}
 
@@ -286,7 +281,7 @@ attach_main(int noerror)
 
 			pkt.type = MSG_WINCH;
 			ioctl(0, TIOCGWINSZ, &pkt.u.ws);
-			write(s, &pkt, sizeof(pkt));
+			write(s.fd_miso, &pkt, sizeof(pkt));
 		}
 	}
 	return 0;
@@ -296,37 +291,10 @@ int
 push_main()
 {
 	struct packet pkt;
-	int s;
+	conn_pipes s;
 
 	/* Attempt to open the socket. */
-	s = connect_socket(sockname);
-	if (s < 0 && errno == ENAMETOOLONG)
-	{
-		char *slash = strrchr(sockname, '/');
-
-		/* Try to shorten the socket's path name by using chdir. */
-		if (slash)
-		{
-			int dirfd = open(".", O_RDONLY);
-
-			if (dirfd >= 0)
-			{
-				*slash = '\0';
-				if (chdir(sockname) >= 0)
-				{
-					s = connect_socket(slash + 1);
-					fchdir(dirfd);
-				}
-				*slash = '/';
-				close(dirfd);
-			}
-		}
-	}
-	if (s < 0)
-	{
-		printf("%s: %s: %s\n", progname, sockname, strerror(errno));
-		return 1;
-	}
+	s = request_and_connect(sockname);
 
 	/* Set some signals. */
 	signal(SIGPIPE, SIG_IGN);
@@ -350,7 +318,7 @@ push_main()
 		}
 
 		pkt.len = len;
-		if (write(s, &pkt, sizeof(struct packet)) < 0)
+		if (write(s.fd_miso, &pkt, sizeof(struct packet)) < 0)
 		{
 			printf("%s: %s: %s\n", progname, sockname,
 			       strerror(errno));
