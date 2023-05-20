@@ -72,18 +72,18 @@ static void restore_term(void) {
 }
 
 /* Connects to a unix domain socket */
-static conn_pipes connect_pipes(const std::string &name) {
-	auto do_open = [](const std::string &nom, int mode) {
-		return ensure_open(nom.c_str(), mode);
+static conn_pipes connect_pipes(const char *name) {
+	auto do_open = [](const char *nom, int mode) {
+		return ensure_open(nom, mode);
 	};
 
 	return conn_pipes{
-		.fd_miso = do_open(name + "_miso", O_WRONLY),
-		.fd_mosi = do_open(name + "_mosi", O_RDONLY),
+		.fd_miso = do_open(str_fmt("%s_miso", name), O_WRONLY),
+		.fd_mosi = do_open(str_fmt("%s_mosi", name), O_RDONLY),
 	};
 }
 
-static conn_pipes request_and_connect(const std::string &name) {
+static conn_pipes request_and_connect(const char *name) {
 	puts("note: if you see this message forever, check for stale pipe files");
 
 	auto pmain = connect_pipes(name);
@@ -101,10 +101,10 @@ static conn_pipes request_and_connect(const std::string &name) {
 		exit(2);
 	}
 
-	return connect_pipes(name + "_" + std::to_string((int)this_index));
+	return connect_pipes(str_fmt("%s_%u", name, this_index));
 }
 
-static void disconnect(const std::string &name) {
+static void disconnect(const char *name) {
 	auto pmain = connect_pipes(name);
 
 	uint8_t ctrl_byte = this_index;
@@ -178,6 +178,13 @@ int attach_main(int noerror) {
 
 	/* Attempt to open the socket. Don't display an error if noerror is 
 	** set. */
+
+	if (access(str_fmt("%s_miso", sockname), R_OK)) {
+		if (!noerror) {
+			perror("error: unable to open socket file");
+		}
+		return -1;
+	}
 
 	s = request_and_connect(sockname);
 

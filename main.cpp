@@ -128,7 +128,7 @@ main(int argc, char **argv)
 		else if (strncmp(*argv, "--version", strlen(*argv)) == 0)
 		{
 			printf("dtachez - version %s, compiled on %s at %s.\n",
-				PACKAGE_VERSION, __DATE__, __TIME__);
+			       PACKAGE_VERSION, __DATE__, __TIME__);
 			return 0;
 		}
 
@@ -140,7 +140,7 @@ main(int argc, char **argv)
 		{
 			printf("%s: Invalid mode '-%c'\n", progname, mode);
 			printf("Try '%s --help' for more information.\n",
-				progname);
+			       progname);
 			return 1;
 		}
 	}
@@ -148,7 +148,7 @@ main(int argc, char **argv)
 	{
 		printf("%s: No mode was specified.\n", progname);
 		printf("Try '%s --help' for more information.\n",
-			progname);
+		       progname);
 		return 1;
 	}
 	++argv; --argc;
@@ -157,7 +157,7 @@ main(int argc, char **argv)
 	{
 		printf("%s: No socket was specified.\n", progname);
 		printf("Try '%s --help' for more information.\n",
-			progname);
+		       progname);
 		return 1;
 	}
 	sockname = *argv;
@@ -168,9 +168,9 @@ main(int argc, char **argv)
 		if (argc > 0)
 		{
 			printf("%s: Invalid number of arguments.\n",
-				progname);
+			       progname);
 			printf("Try '%s --help' for more information.\n",
-				progname);
+			       progname);
 			return 1;
 		}
 		return push_main();
@@ -192,9 +192,9 @@ main(int argc, char **argv)
 				if (argc < 1)
 				{
 					printf("%s: No escape character "
-						"specified.\n", progname);	
+					       "specified.\n", progname);
 					printf("Try '%s --help' for more "
-						"information.\n", progname);
+					       "information.\n", progname);
 					return 1;
 				}
 				if (argv[0][0] == '^' && argv[0][1])
@@ -214,9 +214,9 @@ main(int argc, char **argv)
 				if (argc < 1)
 				{
 					printf("%s: No redraw method "
-						"specified.\n", progname);	
+					       "specified.\n", progname);
 					printf("Try '%s --help' for more "
-						"information.\n", progname);
+					       "information.\n", progname);
 					return 1;
 				}
 				if (strcmp(argv[0], "none") == 0)
@@ -228,9 +228,9 @@ main(int argc, char **argv)
 				else
 				{
 					printf("%s: Invalid redraw method "
-						"specified.\n", progname);	
+					       "specified.\n", progname);
 					printf("Try '%s --help' for more "
-						"information.\n", progname);
+					       "information.\n", progname);
 					return 1;
 				}
 				break;
@@ -238,9 +238,9 @@ main(int argc, char **argv)
 			else
 			{
 				printf("%s: Invalid option '-%c'\n",
-					progname, *p);
+				       progname, *p);
 				printf("Try '%s --help' for more information.\n",
-					progname);
+				       progname);
 				return 1;
 			}
 		}
@@ -251,7 +251,7 @@ main(int argc, char **argv)
 	{
 		printf("%s: No command was specified.\n", progname);
 		printf("Try '%s --help' for more information.\n",
-			progname);
+		       progname);
 		return 1;
 	}
 
@@ -265,7 +265,7 @@ main(int argc, char **argv)
 	if (dont_have_tty && mode != 'n' && mode != 'N')
 	{
 		printf("%s: Attaching to a session requires a terminal.\n",
-			progname);
+		       progname);
 		return 1;
 	}
 
@@ -274,9 +274,9 @@ main(int argc, char **argv)
 		if (argc > 0)
 		{
 			printf("%s: Invalid number of arguments.\n",
-				progname);
+			       progname);
 			printf("Try '%s --help' for more information.\n",
-				progname);
+			       progname);
 			return 1;
 		}
 		return attach_main(0);
@@ -296,14 +296,14 @@ main(int argc, char **argv)
 		/* Try to attach first. If that doesn't work, create a new
 		** socket. */
 
-		try {
-			attach_main(1);
-		} catch (...) {
+		if (attach_main(1)) {
 			if (master_main(argv, 1, 0) != 0)
 				return 1;
 
 			return attach_main(0);
 		}
+
+
 	}
 	return 0;
 }

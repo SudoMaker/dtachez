@@ -64,15 +64,16 @@ struct pty {
 
 /* A connected client */
 struct client {
-	unsigned index;
+	int8_t index;
 	/* File descriptors of the client. */
 	conn_pipes fds;
 	/* Whether or not the client is attached. */
-	int attached;
-};
+	bool attached;
+} __attribute__((__packed__));
 
 /* The list of connected clients. */
-static std::list<client> clients;
+static struct client clients[127];
+static uint8_t nr_clients = 0;
 /* The pseudo-terminal created for the child process. */
 static struct pty the_pty;
 
@@ -81,22 +82,21 @@ pid_t forkpty(int *amaster, char *name, struct termios *termp,
 	struct winsize *winp);
 #endif
 
-static void unlink_socket(const std::string &s) {
-	auto s1 = s + "_miso";
-	auto s2 = s + "_mosi";
-	unlink(s1.c_str());
-	unlink(s2.c_str());
+static void unlink_socket(const char *s) {
+	unlink(str_fmt("%s_miso", s));
+	unlink(str_fmt("%s_mosi", s));
 }
 
 static void unlink_socket(unsigned idx) {
-	unlink_socket(std::string(sockname) + "_" + std::to_string(idx));
+	unlink_socket(str_fmt("%s_%u", sockname, idx));
 }
 
 /* Unlink the socket */
 static void unlink_socket(void) {
 	unlink_socket(sockname);
 	for (auto &it : clients) {
-		unlink_socket(it.index);
+		if (it.index != -1)
+			unlink_socket(it.index);
 	}
 }
 
@@ -187,11 +187,11 @@ killpty(struct pty *pty, int sig)
 }
 
 /* Creates a new unix domain socket. */
-static conn_pipes create_conn_pipes(const std::string &name, bool nonblocking) {
-	auto mkfifo_and_open = [](const std::string &nom, bool nonblocking) {
-		ensure_mkfifo(nom.c_str());
+static conn_pipes create_conn_pipes(const char *name, bool nonblocking) {
+	auto mkfifo_and_open = [](const char *nom, bool nonblocking) {
+		ensure_mkfifo(nom);
 
-		int s = ensure_open(nom.c_str(), O_RDWR);
+		int s = ensure_open(nom, O_RDWR);
 
 		if (nonblocking) {
 			if (setnonblocking(s)) {
@@ -203,8 +203,8 @@ static conn_pipes create_conn_pipes(const std::string &name, bool nonblocking) {
 	};
 
 	return {
-		.fd_miso = mkfifo_and_open(name + "_miso", nonblocking),
-		.fd_mosi = mkfifo_and_open(name + "_mosi", nonblocking),
+		.fd_miso = mkfifo_and_open(str_fmt("%s_miso", name), nonblocking),
+		.fd_mosi = mkfifo_and_open(str_fmt("%s_mosi", name), nonblocking),
 	};
 }
 
@@ -233,7 +233,8 @@ static void pty_activity(const conn_pipes &s) {
 	unsigned char buf[BUFSIZE];
 	ssize_t len;
 	fd_set readfds, writefds;
-	int highest_fd, nclients;
+	int highest_fd, nclients = 0;
+	unsigned cnt = 0;
 
 	/* Read the pty activity */
 	len = read(the_pty.fd, buf, sizeof(buf));
@@ -261,45 +262,62 @@ top:
 	FD_ZERO(&writefds);
 	FD_SET(s.fd_miso, &readfds);
 	highest_fd = s.fd_miso;
+	cnt = 0;
 	for (auto &it : clients) {
-		if (!it.attached)
-			continue;
-		FD_SET(it.fds.fd_mosi, &writefds);
-		if (it.fds.fd_mosi > highest_fd)
-			highest_fd = it.fds.fd_mosi;
-		nclients++;
+		if (it.index != -1) {
+			cnt++;
+			if (!it.attached)
+				continue;
+			FD_SET(it.fds.fd_mosi, &writefds);
+			if (it.fds.fd_mosi > highest_fd)
+				highest_fd = it.fds.fd_mosi;
+			nclients++;
+		}
+
+		if (cnt >= nr_clients) {
+			break;
+		}
 	}
 
 	if (nclients == 0)
 		return;
 
-	if (select(highest_fd + 1, &readfds, &writefds, NULL, NULL) < 0)
+	if (select(highest_fd + 1, &readfds, &writefds, nullptr, nullptr) < 0)
 		return;
 
 	/* Send the data out to the clients. */
+	cnt = 0;
 	for (auto &it : clients) {
-		ssize_t written;
+		if (it.index != -1) {
+			cnt++;
 
-		if (!FD_ISSET(it.fds.fd_mosi, &writefds))
-			continue;
+			ssize_t written;
 
-		written = 0;
-		while (written < len) {
-			ssize_t n = write(it.fds.fd_mosi, buf + written, len - written);
-
-			if (n > 0) {
-				written += n;
+			if (!FD_ISSET(it.fds.fd_mosi, &writefds))
 				continue;
+
+			written = 0;
+			while (written < len) {
+				ssize_t n = write(it.fds.fd_mosi, buf + written, len - written);
+
+				if (n > 0) {
+					written += n;
+					continue;
+				} else if (n < 0 && errno == EINTR)
+					continue;
+				else if (n < 0 && errno != EAGAIN)
+					nclients = -1;
+				break;
 			}
-			else if (n < 0 && errno == EINTR)
-				continue;
-			else if (n < 0 && errno != EAGAIN)
-				nclients = -1;
-			break;
+
+			if (nclients != -1 && written == len)
+				nclients++;
+
 		}
 
-		if (nclients != -1 && written == len)
-			nclients++;
+		if (cnt >= nr_clients) {
+			break;
+		}
 	}
 
 	/* Try again if nothing happened. */
@@ -322,7 +340,7 @@ static void control_activity(const conn_pipes &fd_main_pipe) {
 		uint8_t new_index = 0;
 
 		for (auto &it : clients) {
-			if (new_index == it.index) {
+			if (it.index != -1) {
 				new_index++;
 			} else {
 				break;
@@ -330,27 +348,32 @@ static void control_activity(const conn_pipes &fd_main_pipe) {
 		}
 
 		if (new_index < 127) {
-			clients.emplace_back(client{
-				.index = new_index,
-				.fds = create_conn_pipes(std::string(sockname) + "_" + std::to_string(new_index), true),
-				.attached = 0,
-			});
+			auto &cl = clients[new_index];
+
+			cl.index = (int8_t)new_index;
+			cl.fds = create_conn_pipes(str_fmt("%s_%u", sockname, new_index), true);
+			cl.attached = false;
+
+			nr_clients++;
 		}
 
 		if (write(fd_main_pipe.fd_mosi, &new_index, 1) != 1) {
 			THROW_ERROR("failed to write main pipe");
 		}
 
+
+
 //		printf("opened client %u\n", new_index);
 	} else {
-		for (auto it = clients.begin(); it != clients.end(); it++) {
-			if (it->index == req_index) {
-				close(it->fds.fd_miso);
-				close(it->fds.fd_mosi);
-				clients.erase(it);
-				unlink_socket((unsigned)req_index);
-				break;
-			}
+		auto &cl = clients[req_index];
+
+		if (cl.index == req_index) {
+			cl.index = -1;
+			cl.attached = false;
+			close(cl.fds.fd_miso);
+			close(cl.fds.fd_mosi);
+			unlink_socket((unsigned)req_index);
+			nr_clients--;
 		}
 
 //		printf("closed client %u\n", req_index);
@@ -382,9 +405,9 @@ static int client_activity(struct client *p) {
 
 		/* Attach or detach from the program. */
 	else if (pkt.type == MSG_ATTACH)
-		p->attached = 1;
+		p->attached = true;
 	else if (pkt.type == MSG_DETACH)
-		p->attached = 0;
+		p->attached = false;
 
 		/* Window size change request, without a forced redraw. */
 	else if (pkt.type == MSG_WINCH)
@@ -437,6 +460,12 @@ static void master_process(const conn_pipes &fd_main_pipe, char **argv, int wait
 	fd_set readfds;
 	int highest_fd;
 	int nullfd;
+	uint8_t cnt = 0;
+
+	for (auto &it : clients) {
+		it.index = -1;
+		it.attached = false;
+	}
 
 	int has_attached_client = 0;
 
@@ -496,7 +525,7 @@ static void master_process(const conn_pipes &fd_main_pipe, char **argv, int wait
 		** before trying to read from the pty.
 		*/
 		if (waitattach) {
-			if (!clients.empty() && clients.front().attached)
+			if (clients[0].index != -1 && clients[0].attached)
 				waitattach = 0;
 		} else {
 			FD_SET(the_pty.fd, &readfds);
@@ -504,13 +533,22 @@ static void master_process(const conn_pipes &fd_main_pipe, char **argv, int wait
 				highest_fd = the_pty.fd;
 		}
 
+		cnt = 0;
 		for (auto &it : clients) {
-			FD_SET(it.fds.fd_miso, &readfds);
-			if (it.fds.fd_miso > highest_fd)
-				highest_fd = it.fds.fd_miso;
+			if (it.index != -1) {
+				FD_SET(it.fds.fd_miso, &readfds);
+				if (it.fds.fd_miso > highest_fd)
+					highest_fd = it.fds.fd_miso;
 
-			if (it.attached)
-				new_has_attached_client = 1;
+				if (it.attached)
+					new_has_attached_client = 1;
+
+				cnt++;
+			}
+
+			if (cnt >= nr_clients) {
+				break;
+			}
 		}
 
 		/* chmod the socket if necessary. */
@@ -531,14 +569,21 @@ static void master_process(const conn_pipes &fd_main_pipe, char **argv, int wait
 		if (FD_ISSET(fd_main_pipe.fd_miso, &readfds))
 			control_activity(fd_main_pipe);
 		/* Activity on a client? */
-		for (auto it = clients.begin(); it != clients.end(); ) {
-			if (FD_ISSET(it->fds.fd_miso, &readfds)) {
-				if (client_activity(&(*it))) {
-					it = clients.erase(it);
-					continue;
+		cnt = 0;
+		for (auto &it : clients) {
+			if (it.index != -1) {
+				cnt++;
+
+				if (FD_ISSET(it.fds.fd_miso, &readfds)) {
+					if (client_activity(&it)) {
+						it.index = -1;
+					}
 				}
 			}
-			it++;
+
+			if (cnt >= nr_clients) {
+				break;
+			}
 		}
 		/* pty activity? */
 		if (FD_ISSET(the_pty.fd, &readfds))

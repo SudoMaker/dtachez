@@ -3,7 +3,8 @@ project(dtachez C CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 
-add_compile_options(-g -Os)
+add_compile_options(-g -Os -nodefaultlibs -fno-exceptions)
+add_link_options(-g -Os -nodefaultlibs -fno-exceptions)
 
 if (CMAKE_C_COMPILER MATCHES "mips")
     message("-- Optimizing for Ingenic MIPS platform")
@@ -17,4 +18,4 @@ if (CMAKE_C_COMPILER MATCHES "mips")
 endif()
 
 add_executable(dtachez main.cpp attach.cpp master.cpp util.cpp)
-target_link_libraries(dtachez util)
+target_link_libraries(dtachez c util)

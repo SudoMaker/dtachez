@@ -45,16 +45,13 @@
 
 #pragma once
 
-#include <list>
-#include <exception>
-#include <system_error>
-
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
+#include <cinttypes>
+#include <climits>
 #include <ctime>
 
 #include "config.h"
@@ -63,7 +60,7 @@
 
 #include <fcntl.h>
 
-#define THROW_ERROR(s)		throw std::system_error(errno, std::system_category(), (s))
+#define THROW_ERROR(s)		{puts(s); exit(2);}
 
 #ifdef HAVE_UTIL_H
 #include <util.h>
@@ -152,6 +149,9 @@ extern void write_all(int fd, const void *buf, size_t count);
 extern void read_all(int fd, void *buf, size_t count);
 extern int ensure_open(const char *s, int m);
 extern void ensure_mkfifo(const char *s);
+extern char *_str_fmt(const char *fmt, ...) __attribute__ ((__format__ (__printf__, 1, 2)));
+
+#define str_fmt(...) strdupa(_str_fmt(__VA_ARGS__))
 
 #ifdef sun
 #define BROKEN_MASTER
