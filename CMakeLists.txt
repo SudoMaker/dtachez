@@ -8,7 +8,7 @@ add_link_options(-g -Os -nodefaultlibs -fno-exceptions)
 
 if (CMAKE_C_COMPILER MATCHES "mips")
     message("-- Optimizing for Ingenic MIPS platform")
-    set(CFLAGS_COMMON -march=mips32r2 -mno-interlink-compressed -mno-shared -Os
+    set(CFLAGS_COMMON -march=mips32r2 -mno-interlink-compressed -Os
             --param=l1-cache-size=16 --param=l1-cache-line-size=32 --param=l2-cache-size=128
             -ffunction-sections -fdata-sections
             -flto -ffat-lto-objects
@@ -19,3 +19,4 @@ endif()
 
 add_executable(dtachez main.cpp attach.cpp master.cpp util.cpp)
 target_link_libraries(dtachez c util)
+install(TARGETS dtachez DESTINATION bin)
